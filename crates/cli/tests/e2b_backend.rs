@@ -67,11 +67,22 @@ fn listed_sandbox_json(id: &str, state: &str) -> Value {
     })
 }
 
+/// Mount a `GET /v2/sandboxes` (find-by-metadata) responder. `acquire` finds
+/// before creating, so create-path tests mount this returning an empty list.
+async fn mount_find(server: &MockServer, items: Value) {
+    Mock::given(method("GET"))
+        .and(path("/v2/sandboxes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(items))
+        .mount(server)
+        .await;
+}
+
 #[tokio::test]
-async fn acquire_posts_to_sandboxes_with_metadata() {
+async fn acquire_creates_when_no_match() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
 
+    mount_find(&server, json!([])).await;
     Mock::given(method("POST"))
         .and(path("/sandboxes"))
         .respond_with(ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-fresh")))
@@ -85,8 +96,11 @@ async fn acquire_posts_to_sandboxes_with_metadata() {
         .expect("acquire should succeed");
 
     let requests = server.received_requests().await.unwrap_or_default();
-    assert_eq!(requests.len(), 1);
-    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let create = requests
+        .iter()
+        .find(|r| r.url.path() == "/sandboxes" && r.method.as_str() == "POST")
+        .expect("create called");
+    let body: Value = serde_json::from_slice(&create.body).unwrap();
     assert_eq!(body.get("templateID").and_then(Value::as_str), Some("base"));
     let metadata = body
         .get("metadata")
@@ -125,25 +139,20 @@ async fn acquire_rejects_host_mounts() {
 }
 
 #[tokio::test]
-async fn try_resume_finds_running_sandbox_without_connect() {
+async fn acquire_reuses_running_sandbox_without_connect_or_create() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
 
-    Mock::given(method("GET"))
-        .and(path("/v2/sandboxes"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(json!([listed_sandbox_json("sb-running", "running"),])),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
+    mount_find(
+        &server,
+        json!([listed_sandbox_json("sb-running", "running")]),
+    )
+    .await;
 
     let handle = backend
-        .try_resume(make_request("conv-3", "sandbox-3"))
+        .acquire(make_request("conv-3", "sandbox-3"))
         .await
-        .expect("try_resume ok")
-        .expect("should find sandbox");
+        .expect("acquire should reuse the running sandbox");
 
     assert_eq!(handle.id(), "e2b:conversation:conv-3:sandbox-3");
 
@@ -152,21 +161,20 @@ async fn try_resume_finds_running_sandbox_without_connect() {
         !requests.iter().any(|r| r.url.path().contains("/connect")),
         "running sandbox must not call connect"
     );
+    assert!(
+        !requests
+            .iter()
+            .any(|r| r.url.path() == "/sandboxes" && r.method.as_str() == "POST"),
+        "reusing a running sandbox must not create a new one"
+    );
 }
 
 #[tokio::test]
-async fn try_resume_connects_paused_sandbox() {
+async fn acquire_connects_paused_sandbox_without_creating() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
 
-    Mock::given(method("GET"))
-        .and(path("/v2/sandboxes"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(json!([listed_sandbox_json("sb-paused", "paused"),])),
-        )
-        .mount(&server)
-        .await;
+    mount_find(&server, json!([listed_sandbox_json("sb-paused", "paused")])).await;
     Mock::given(method("POST"))
         .and(path("/sandboxes/sb-paused/connect"))
         .respond_with(ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-paused")))
@@ -175,32 +183,30 @@ async fn try_resume_connects_paused_sandbox() {
         .await;
 
     backend
-        .try_resume(make_request("conv-4", "sandbox-4"))
+        .acquire(make_request("conv-4", "sandbox-4"))
         .await
-        .expect("try_resume ok")
-        .expect("should find paused sandbox");
+        .expect("acquire should connect the paused sandbox");
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert!(
+        !requests
+            .iter()
+            .any(|r| r.url.path() == "/sandboxes" && r.method.as_str() == "POST"),
+        "connecting a paused sandbox must not create a new one"
+    );
 }
 
 #[tokio::test]
-async fn try_resume_list_metadata_query_is_not_double_url_encoded() {
+async fn acquire_list_metadata_query_is_not_double_url_encoded() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
 
-    Mock::given(method("GET"))
-        .and(path("/v2/sandboxes"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(json!([listed_sandbox_json("sb-keyed", "running"),])),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
+    mount_find(&server, json!([listed_sandbox_json("sb-keyed", "running")])).await;
 
     backend
-        .try_resume(make_request("conv-colons", "sandbox-colons"))
+        .acquire(make_request("conv-colons", "sandbox-colons"))
         .await
-        .expect("try_resume ok")
-        .expect("should find sandbox");
+        .expect("acquire should reuse the found sandbox");
 
     let requests = server.received_requests().await.unwrap_or_default();
     let query = requests[0]
@@ -223,22 +229,29 @@ async fn try_resume_list_metadata_query_is_not_double_url_encoded() {
 }
 
 #[tokio::test]
-async fn try_resume_returns_none_when_no_match() {
+async fn acquire_falls_back_to_unfiltered_find_then_creates() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
 
+    // Empty result on both the state-filtered and the fallback (unfiltered) find
+    // → two GETs, then a create.
     Mock::given(method("GET"))
         .and(path("/v2/sandboxes"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
         .expect(2)
         .mount(&server)
         .await;
+    Mock::given(method("POST"))
+        .and(path("/sandboxes"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-5")))
+        .expect(1)
+        .mount(&server)
+        .await;
 
-    let handle = backend
-        .try_resume(make_request("conv-5", "sandbox-5"))
+    backend
+        .acquire(make_request("conv-5", "sandbox-5"))
         .await
-        .expect("try_resume ok");
-    assert!(handle.is_none());
+        .expect("acquire should create after an empty find");
 }
 
 #[tokio::test]
@@ -246,6 +259,7 @@ async fn stop_calls_pause_not_delete() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
 
+    mount_find(&server, json!([])).await;
     Mock::given(method("POST"))
         .and(path("/sandboxes"))
         .respond_with(ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-stop")))
@@ -277,6 +291,7 @@ async fn snapshot_returns_e2b_snapshot_payload() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
 
+    mount_find(&server, json!([])).await;
     Mock::given(method("POST"))
         .and(path("/sandboxes"))
         .respond_with(ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-snap")))
@@ -369,6 +384,7 @@ async fn exec_uses_envd_process_start() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
 
+    mount_find(&server, json!([])).await;
     Mock::given(method("POST"))
         .and(path("/sandboxes"))
         .respond_with(ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-exec")))

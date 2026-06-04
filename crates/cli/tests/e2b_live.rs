@@ -10,16 +10,24 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use exoharness::{
-    E2bConfig, E2bSandboxBackend, ManagedSandboxBackend, SandboxKey, SandboxLifecycleConfig,
-    SandboxNetworkPolicy, SandboxRequest, SandboxSpec,
+    DEFAULT_E2B_API_URL, DEFAULT_E2B_ENVD_PORT, E2bConfig, E2bSandboxBackend,
+    ManagedSandboxBackend, SandboxKey, SandboxLifecycleConfig, SandboxNetworkPolicy,
+    SandboxRequest, SandboxSpec,
 };
 
 fn live_config() -> Option<E2bConfig> {
-    if std::env::var("E2B_API_KEY").is_err() {
+    let Ok(api_key) = std::env::var("E2B_API_KEY") else {
         eprintln!("skipping E2B live test: E2B_API_KEY not set");
         return None;
-    }
-    E2bConfig::from_env().ok()
+    };
+    Some(E2bConfig {
+        api_key,
+        api_url: std::env::var("E2B_API_URL").unwrap_or_else(|_| DEFAULT_E2B_API_URL.to_string()),
+        template_id: std::env::var("E2B_TEMPLATE_ID").unwrap_or_else(|_| "base".into()),
+        envd_port: DEFAULT_E2B_ENVD_PORT,
+        envd_base_url: None,
+        secure: false,
+    })
 }
 
 fn live_request(label: &str) -> SandboxRequest {
@@ -94,11 +102,12 @@ async fn live_try_resume_finds_sandbox_after_process_boundary() {
         .expect("write marker");
     drop(handle);
 
+    // Resume is folded into acquire: a second acquire finds the existing VM by
+    // metadata instead of creating a new one.
     let resumed = backend
-        .try_resume(request)
+        .acquire(request)
         .await
-        .expect("try_resume")
-        .expect("E2B sandbox should be listed by metadata after acquire");
+        .expect("acquire should resume the existing sandbox by metadata");
     let output = resumed
         .exec(&exoharness::SandboxCommand {
             argv: vec![

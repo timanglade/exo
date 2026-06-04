@@ -453,6 +453,7 @@ pub struct CreateSandboxRequest {
 #[serde(rename_all = "snake_case")]
 pub enum SandboxProvider {
     Daytona,
+    E2b,
     AppleContainer,
     Docker,
     #[serde(alias = "local")]

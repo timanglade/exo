@@ -2168,6 +2168,7 @@ dependencies = [
  "aes-gcm 0.11.0-rc.3",
  "anyhow",
  "async-trait",
+ "base64",
  "bytes",
  "chrono",
  "futures",

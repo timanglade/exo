@@ -63,6 +63,7 @@ pub enum SandboxBackendChoice {
     Docker,
     LocalProcess,
     Daytona(DaytonaBackendSpec),
+    E2b(E2bBackendSpec),
 }
 
 impl SandboxBackendChoice {
@@ -72,6 +73,7 @@ impl SandboxBackendChoice {
             Self::Docker => SandboxProvider::Docker,
             Self::LocalProcess => SandboxProvider::LocalProcess,
             Self::Daytona(_) => SandboxProvider::Daytona,
+            Self::E2b(_) => SandboxProvider::E2b,
         }
     }
 }
@@ -98,6 +100,36 @@ impl DaytonaBackendSpec {
             api_key_secret: "DAYTONA_API_KEY".to_string(),
             organization_id_secret: Some("DAYTONA_ORGANIZATION_ID".to_string()),
             target_secret: Some("DAYTONA_TARGET".to_string()),
+        }
+    }
+}
+
+/// E2B connection config plus the secret-store name for its API key, resolved
+/// lazily so the harness can advertise E2B before the key is set.
+#[derive(Debug, Clone)]
+pub struct E2bBackendSpec {
+    pub api_url: String,
+    pub template_id: String,
+    pub envd_port: u16,
+    /// Override for the per-sandbox envd base URL; `None` uses the public
+    /// `{port}-{id}.e2b.app` host (set by tests to target a mock server).
+    pub envd_base_url: Option<String>,
+    pub secure: bool,
+    /// Secret holding the API key (required at first use).
+    pub api_key_secret: String,
+}
+
+impl E2bBackendSpec {
+    /// Official endpoint + `base` template; API key read from the conventional
+    /// `E2B_API_KEY` secret name.
+    pub fn with_conventional_secrets() -> Self {
+        Self {
+            api_url: crate::DEFAULT_E2B_API_URL.to_string(),
+            template_id: "base".to_string(),
+            envd_port: crate::DEFAULT_E2B_ENVD_PORT,
+            envd_base_url: None,
+            secure: false,
+            api_key_secret: "E2B_API_KEY".to_string(),
         }
     }
 }
@@ -187,6 +219,25 @@ impl BasicExoHarnessInner {
                     toolbox_url: spec.toolbox_url.clone(),
                     target,
                     organization_id,
+                })?)
+            }
+            SandboxBackendChoice::E2b(spec) => {
+                let api_key = self
+                    .secret_key(&spec.api_key_secret)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "e2b sandbox requested but secret {:?} is not set",
+                            spec.api_key_secret
+                        )
+                    })?;
+                Arc::new(crate::E2bSandboxBackend::new(crate::E2bConfig {
+                    api_key,
+                    api_url: spec.api_url.clone(),
+                    template_id: spec.template_id.clone(),
+                    envd_port: spec.envd_port,
+                    envd_base_url: spec.envd_base_url.clone(),
+                    secure: spec.secure,
                 })?)
             }
         };

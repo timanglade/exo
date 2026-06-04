@@ -24,12 +24,13 @@ use executor::{
     AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, BasicToolRuntime,
     Binding, BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig,
     ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, DaytonaBackendSpec,
-    EventKind, EventQuery, EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions,
-    FileSystemMount, FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET,
-    Harness, HarnessAgent, HarnessConversation, HttpExoHarness, LocalSandboxExoHarness,
-    PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider,
-    Secret, SecretBackendChoice, SendRequest, ToolRequest, ToolRuntime, TypeScriptHarness,
-    TypeScriptHarnessConfig, Uuid7, load_agent_config, serve_exoharness_http_listener_with_options,
+    E2bBackendSpec, EventKind, EventQuery, EventQueryDirection, ExoHarness,
+    ExoHarnessHttpServeOptions, FileSystemMount, FileSystemMountMode, ForkConversationRequest,
+    HTTP_EXOHARNESS_TRACING_TARGET, Harness, HarnessAgent, HarnessConversation, HttpExoHarness,
+    LocalSandboxExoHarness, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR,
+    SandboxBackendChoice, SandboxProvider, Secret, SecretBackendChoice, SendRequest, ToolRequest,
+    ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, load_agent_config,
+    serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
@@ -198,6 +199,7 @@ enum SecretBackendArg {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum SandboxProviderArg {
     Daytona,
+    E2b,
     #[value(name = "apple-container")]
     AppleContainer,
     Docker,
@@ -209,6 +211,7 @@ impl From<SandboxProviderArg> for SandboxProvider {
     fn from(value: SandboxProviderArg) -> Self {
         match value {
             SandboxProviderArg::Daytona => Self::Daytona,
+            SandboxProviderArg::E2b => Self::E2b,
             SandboxProviderArg::AppleContainer => Self::AppleContainer,
             SandboxProviderArg::Docker => Self::Docker,
             SandboxProviderArg::LocalProcess => Self::LocalProcess,
@@ -238,6 +241,7 @@ fn default_sandbox_backends() -> Vec<SandboxBackendChoice> {
         default_sandbox_backend(),
         SandboxBackendChoice::LocalProcess,
         SandboxBackendChoice::Daytona(DaytonaBackendSpec::with_conventional_secrets()),
+        SandboxBackendChoice::E2b(E2bBackendSpec::with_conventional_secrets()),
     ]
 }
 
@@ -1833,6 +1837,7 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
 fn format_sandbox_provider(provider: SandboxProvider) -> &'static str {
     match provider {
         SandboxProvider::Daytona => "daytona",
+        SandboxProvider::E2b => "e2b",
         SandboxProvider::AppleContainer => "apple-container",
         SandboxProvider::Docker => "docker",
         SandboxProvider::LocalProcess => "local-process",

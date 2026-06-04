@@ -47,33 +47,6 @@ pub struct E2bConfig {
     pub secure: bool,
 }
 
-impl E2bConfig {
-    pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("E2B_API_KEY")
-            .map_err(|_| anyhow!("E2B_API_KEY is not set; required for the E2B sandbox backend"))?;
-        let api_url =
-            std::env::var("E2B_API_URL").unwrap_or_else(|_| DEFAULT_E2B_API_URL.to_string());
-        let template_id = std::env::var("E2B_TEMPLATE_ID").unwrap_or_else(|_| "base".into());
-        let envd_port = std::env::var("E2B_ENVD_PORT")
-            .ok()
-            .and_then(|raw| raw.parse().ok())
-            .unwrap_or(DEFAULT_E2B_ENVD_PORT);
-        let secure = std::env::var("E2B_SECURE")
-            .ok()
-            .map(|raw| matches!(raw.as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false);
-        let envd_base_url = std::env::var("E2B_ENVD_BASE_URL").ok();
-        Ok(Self {
-            api_key,
-            api_url,
-            template_id,
-            envd_port,
-            envd_base_url,
-            secure,
-        })
-    }
-}
-
 /// JSON persisted for [`SnapshotKind::E2bSnapshot`]. Filesystem state lives in E2B;
 /// we only store the snapshot template id returned by `POST /sandboxes/{id}/snapshots`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,50 +215,42 @@ impl ManagedSandboxBackend for E2bSandboxBackend {
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
         reject_host_mounts(&request)?;
         let spec_hash = sandbox_spec_hash(&request.spec);
-        let template_id = resolve_template_id(&request.spec, &self.template_id);
-        let sandbox = self
-            .create_sandbox(&request, &spec_hash, &template_id)
-            .await?;
-        Ok(Arc::new(E2bSandboxHandle {
-            id: format!("e2b:{}", request.key),
-            sandbox_id: sandbox.sandbox_id,
-            envd_access_token: sandbox.envd_access_token,
-            request,
-            backend: self.handle_backend(),
-        }))
-    }
-
-    async fn try_resume(
-        &self,
-        request: SandboxRequest,
-    ) -> Result<Option<Arc<dyn ManagedSandboxHandle>>> {
-        reject_host_mounts(&request)?;
-        let spec_hash = sandbox_spec_hash(&request.spec);
         let key_label = request.key.to_string();
 
-        let Some(existing) = self
+        // Reuse a matching sandbox if one exists (also how a sandbox is recovered
+        // across exo restarts); E2B keeps the filesystem across pause. Reconnect a
+        // paused one to wake it and refresh its envd token.
+        let (sandbox_id, envd_access_token) = match self
             .find_sandbox_by_metadata(&key_label, &spec_hash)
             .await?
-        else {
-            return Ok(None);
+        {
+            Some(existing) => {
+                let mut token = None;
+                if existing.state == "paused" {
+                    let timeout_secs = idle_ttl_to_e2b_lifecycle(&request.lifecycle.idle_ttl).0;
+                    token = self
+                        .connect_sandbox(&existing.sandbox_id, timeout_secs)
+                        .await?
+                        .envd_access_token;
+                }
+                (existing.sandbox_id, token)
+            }
+            None => {
+                let template_id = resolve_template_id(&request.spec, &self.template_id);
+                let created = self
+                    .create_sandbox(&request, &spec_hash, &template_id)
+                    .await?;
+                (created.sandbox_id, created.envd_access_token)
+            }
         };
 
-        let mut envd_access_token = None;
-        if existing.state == "paused" {
-            let timeout_secs = idle_ttl_to_e2b_lifecycle(&request.lifecycle.idle_ttl).0;
-            let connected = self
-                .connect_sandbox(&existing.sandbox_id, timeout_secs)
-                .await?;
-            envd_access_token = connected.envd_access_token;
-        }
-
-        Ok(Some(Arc::new(E2bSandboxHandle {
+        Ok(Arc::new(E2bSandboxHandle {
             id: format!("e2b:{}", request.key),
-            sandbox_id: existing.sandbox_id,
+            sandbox_id,
             envd_access_token,
             request,
             backend: self.handle_backend(),
-        })))
+        }))
     }
 
     async fn acquire_from_snapshot(
@@ -601,10 +566,10 @@ mod connect_tests {
 
 /// E2B envd encodes stdout/stderr chunks as standard base64 in Connect JSON events.
 fn decode_process_bytes(raw: &str) -> String {
-    if let Ok(decoded) = BASE64.decode(raw.trim().as_bytes()) {
-        if let Ok(text) = String::from_utf8(decoded) {
-            return text;
-        }
+    if let Ok(decoded) = BASE64.decode(raw.trim().as_bytes())
+        && let Ok(text) = String::from_utf8(decoded)
+    {
+        return text;
     }
     raw.to_string()
 }
@@ -613,12 +578,11 @@ fn parse_exit_code(end: &serde_json::Value) -> i32 {
     if let Some(code) = end.get("exitCode").and_then(|v| v.as_i64()) {
         return code as i32;
     }
-    if let Some(status) = end.get("status").and_then(|v| v.as_str()) {
-        if let Some(rest) = status.strip_prefix("exit status ") {
-            if let Ok(code) = rest.trim().parse::<i32>() {
-                return code;
-            }
-        }
+    if let Some(status) = end.get("status").and_then(|v| v.as_str())
+        && let Some(rest) = status.strip_prefix("exit status ")
+        && let Ok(code) = rest.trim().parse::<i32>()
+    {
+        return code;
     }
     0
 }
@@ -680,7 +644,7 @@ fn reject_host_mounts(request: &SandboxRequest) -> Result<()> {
     }
     bail!(
         "E2B sandbox backend does not support host bind-mounts; \
-         remove conversation mounts or switch to --sandbox-backend docker. \
+         remove conversation mounts or use a local/docker provider. \
          A remote-workspace provisioner is planned as a follow-up."
     )
 }

@@ -117,6 +117,9 @@ pub enum SnapshotKind {
     /// JSON manifest pointing at a named snapshot in Daytona's registry; the
     /// filesystem bytes live in Daytona, not in the payload.
     DaytonaSnapshot,
+    /// JSON manifest pointing at an E2B snapshot template id; the filesystem
+    /// bytes live in E2B, not in the payload.
+    E2bSnapshot,
 }
 
 #[async_trait]
@@ -440,6 +443,9 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             ),
             (_, SnapshotKind::DaytonaSnapshot) => {
                 bail!("container backends cannot restore a Daytona snapshot")
+            }
+            (_, SnapshotKind::E2bSnapshot) => {
+                bail!("container backends cannot restore an E2B snapshot")
             }
         }
 
