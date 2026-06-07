@@ -530,6 +530,7 @@ impl ChatRepl {
                 id: sandbox_id,
                 snapshot_id,
                 idle_seconds: None,
+                provider: None,
             })
             .await?;
         Ok(())

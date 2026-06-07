@@ -474,6 +474,12 @@ pub struct StartSandboxRequest {
     pub id: SandboxId,
     pub snapshot_id: SnapshotId,
     pub idle_seconds: Option<u64>,
+    /// Restore under a different provider than the sandbox was created with
+    /// (e.g. migrate a Docker snapshot up to Daytona). `None` keeps the
+    /// sandbox's current provider. The target provider must be supported by the
+    /// harness and able to restore the snapshot's kind.
+    #[serde(default)]
+    pub provider: Option<SandboxProvider>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

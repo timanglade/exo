@@ -1390,6 +1390,13 @@ impl ConversationHandle for BasicConversationHandle {
         if let Some(idle_seconds) = request.idle_seconds {
             sandbox.idle_seconds = idle_seconds;
         }
+        // Optional provider override: restore under a different backend (e.g.
+        // migrate a Docker snapshot up to Daytona). Set before routing so the
+        // restore targets the new backend and the new provider is persisted;
+        // unsupported providers / snapshot kinds error in the calls below.
+        if let Some(provider) = request.provider {
+            sandbox.provider = provider;
+        }
 
         // Remote work before the write lock: stop any previous handle, then boot
         // the restored sandbox.
