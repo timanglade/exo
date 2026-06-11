@@ -17,6 +17,7 @@ import {
   parseWorkerCommand,
   writeWorkerEvent,
 } from "../protocol";
+import { DiscordVoice } from "./voice";
 
 const SEND_TIMEOUT_MS = 60_000;
 
@@ -35,15 +36,30 @@ if (trigger !== "all_messages" && trigger !== "mentions_only") {
   throw new Error("Discord trigger must be all_messages or mentions_only");
 }
 
+const voiceEnabled = config.voice === true;
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent,
+    ...(voiceEnabled ? [GatewayIntentBits.GuildVoiceStates] : []),
   ],
   partials: [Partials.Channel],
 });
+
+let voice: DiscordVoice | null = null;
+if (voiceEnabled) {
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!openaiKey) {
+    throw new Error(
+      "Discord voice requires OPENAI_API_KEY in the worker environment",
+    );
+  }
+  voice = new DiscordVoice(client, openaiKey, writeWorkerEvent);
+  voice.register();
+}
 
 client.on("error", (error) => {
   writeWorkerEvent({ type: "error", message: error.message });
@@ -124,6 +140,11 @@ for await (const line of input) {
       content: command.text,
       files: await discordAttachmentFiles(command.attachments),
     });
+    // If this target has an active voice session, also speak the reply. The
+    // text send above doubles as the inspectable transcript of the voice turn.
+    if (voice) {
+      await voice.maybeSpeak(target, command.text);
+    }
     writeWorkerEvent({
       type: "lifecycle",
       name: "send_result",
