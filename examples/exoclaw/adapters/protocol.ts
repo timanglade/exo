@@ -15,6 +15,15 @@ export type AdapterAttachment = {
   fileName?: string | null;
 };
 
+export type AdapterInboundAttachment = {
+  id?: string | null;
+  url: string;
+  proxyUrl?: string | null;
+  fileName?: string | null;
+  mimeType?: string | null;
+  sizeBytes?: number | null;
+};
+
 export type WorkerInboundEvent =
   | {
       type: "connected";
@@ -27,6 +36,7 @@ export type WorkerInboundEvent =
       sender?: string | null;
       text: string;
       message_id?: string | null;
+      attachments?: AdapterInboundAttachment[];
       metadata?: JsonObject;
     }
   | {

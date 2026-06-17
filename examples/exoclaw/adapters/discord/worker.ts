@@ -124,11 +124,20 @@ client.on("messageCreate", (message) => {
     sender: message.author.id,
     text: message.content,
     message_id: message.id,
+    attachments: Array.from(message.attachments.values()).map((attachment) => ({
+      id: attachment.id,
+      url: attachment.url,
+      proxyUrl: attachment.proxyURL,
+      fileName: attachment.name,
+      mimeType: attachment.contentType,
+      sizeBytes: attachment.size,
+    })),
     metadata: {
       authorUsername: message.author.tag,
       channelId: message.channelId,
       guildId: message.guildId,
       channelType: message.channel.type,
+      attachmentCount: message.attachments.size,
     },
   });
 });

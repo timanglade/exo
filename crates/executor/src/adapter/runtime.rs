@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use exoharness::{AgentHandle, ConversationHandle, Secret, SecretId};
+use exoharness::{
+    AgentHandle, ArtifactVersion, ConversationHandle, Secret, SecretId, WriteArtifactRequest,
+};
 use serde::Deserialize;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
@@ -15,7 +17,7 @@ use super::types::{
     AdapterAttachment, AdapterConfig, AdapterEventType, AdapterRecord,
     AdapterTargetConversationRecord, now_ms,
 };
-use super::worker::{WorkerCommand, WorkerEvent, run_worker_loop};
+use super::worker::{WorkerCommand, WorkerEvent, WorkerInboundAttachment, run_worker_loop};
 use crate::conversation_events::{
     HOST_EVENT_ADAPTER_RUNNER_DRAINING, HOST_EVENT_ADAPTER_RUNNER_STARTED, HOST_EVENT_REBOOT,
     record_host_event,
@@ -569,6 +571,7 @@ async fn handle_worker_event(
             sender,
             text,
             message_id,
+            attachments,
             metadata,
         } => {
             let conversation = resolve_message_conversation(
@@ -586,11 +589,14 @@ async fn handle_worker_event(
                 conversation.as_ref(),
                 adapter,
                 config,
-                target,
-                sender,
-                text,
-                message_id,
-                metadata,
+                InboundWorkerMessage {
+                    target,
+                    sender,
+                    text,
+                    message_id,
+                    attachments,
+                    metadata,
+                },
             )
             .await
         }
@@ -725,17 +731,30 @@ fn short_slug_part(value: &str) -> String {
         .collect()
 }
 
+struct InboundWorkerMessage {
+    target: String,
+    sender: Option<String>,
+    text: String,
+    message_id: Option<String>,
+    attachments: Vec<WorkerInboundAttachment>,
+    metadata: serde_json::Value,
+}
+
 async fn handle_worker_message(
     store: &AdapterStore,
     conversation: &dyn HarnessConversation,
     adapter: &AdapterRecord,
     config: &AdapterConfig,
-    target: String,
-    sender: Option<String>,
-    text: String,
-    message_id: Option<String>,
-    _metadata: serde_json::Value,
+    message: InboundWorkerMessage,
 ) -> Result<()> {
+    let InboundWorkerMessage {
+        target,
+        sender,
+        text,
+        message_id,
+        attachments,
+        metadata: _metadata,
+    } = message;
     if let Some(message_id) = &message_id
         && !store
             .record_inbound_message_once(&adapter.id, &target, message_id)
@@ -743,12 +762,15 @@ async fn handle_worker_message(
     {
         return Ok(());
     }
-    // Note: we intentionally do not write a conversation artifact here.
-    // The wakeup turn below begins immediately, and any artifact writes
-    // through the conversation handle (rather than the active turn) advance
-    // the conversation head and could race with concurrent turns. The full
-    // inbound text is delivered to the agent via the wakeup prompt and the
-    // event is recorded in the AdapterStore for audit.
+    let attachment_artifacts = write_inbound_attachment_artifacts(
+        conversation,
+        adapter,
+        &target,
+        message_id.as_deref(),
+        &attachments,
+    )
+    .await?;
+
     store
         .record_event(
             adapter.id.clone(),
@@ -769,7 +791,7 @@ async fn handle_worker_message(
             target,
             sender.as_deref().unwrap_or("unknown"),
             adapter.name,
-            text,
+            inbound_text_with_attachment_artifacts(&text, &attachment_artifacts),
             adapter.id,
             target,
             adapter.id,
@@ -798,6 +820,126 @@ async fn handle_worker_message(
             .await?;
     }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct InboundAttachmentArtifact {
+    source: WorkerInboundAttachment,
+    artifact: ArtifactVersion,
+}
+
+async fn write_inbound_attachment_artifacts(
+    conversation: &dyn HarnessConversation,
+    adapter: &AdapterRecord,
+    target: &str,
+    message_id: Option<&str>,
+    attachments: &[WorkerInboundAttachment],
+) -> Result<Vec<InboundAttachmentArtifact>> {
+    let mut artifacts = Vec::new();
+    for (index, attachment) in attachments.iter().enumerate() {
+        let response = reqwest::get(&attachment.url).await.with_context(|| {
+            format!(
+                "failed to fetch inbound adapter attachment {}",
+                attachment.url
+            )
+        })?;
+        if !response.status().is_success() {
+            bail!(
+                "failed to fetch inbound adapter attachment {}: HTTP {}",
+                attachment.url,
+                response.status()
+            );
+        }
+        let bytes = response.bytes().await.with_context(|| {
+            format!(
+                "failed to read inbound adapter attachment {}",
+                attachment.url
+            )
+        })?;
+        let path = inbound_attachment_artifact_path(adapter, target, message_id, index, attachment);
+        let artifact = conversation
+            .exoharness_handle()
+            .write_artifact(WriteArtifactRequest {
+                path,
+                contents: bytes.to_vec(),
+            })
+            .await?;
+        artifacts.push(InboundAttachmentArtifact {
+            source: attachment.clone(),
+            artifact,
+        });
+    }
+    Ok(artifacts)
+}
+
+fn inbound_attachment_artifact_path(
+    adapter: &AdapterRecord,
+    target: &str,
+    message_id: Option<&str>,
+    index: usize,
+    attachment: &WorkerInboundAttachment,
+) -> String {
+    let message_part = message_id.unwrap_or("no-message-id");
+    let file_name = attachment
+        .file_name
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("attachment");
+    format!(
+        "adapter-inbound/{}/{}/{}/{:02}-{}",
+        stable_target_key(&adapter.id),
+        stable_target_key(target),
+        stable_target_key(message_part),
+        index + 1,
+        sanitize_artifact_file_name(file_name),
+    )
+}
+
+fn sanitize_artifact_file_name(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('_');
+    if trimmed.is_empty() {
+        "attachment".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn inbound_text_with_attachment_artifacts(
+    text: &str,
+    artifacts: &[InboundAttachmentArtifact],
+) -> String {
+    if artifacts.is_empty() {
+        return text.to_string();
+    }
+    let mut result = text.to_string();
+    result.push_str("\n\nAttachments saved as conversation artifacts:\n");
+    for artifact in artifacts {
+        let file_name = artifact.source.file_name.as_deref().unwrap_or("attachment");
+        let mime = artifact
+            .source
+            .mime_type
+            .as_deref()
+            .unwrap_or("unknown MIME");
+        result.push_str(&format!(
+            "- {} ({}, {} bytes): artifact `{}` at `{}`\n",
+            file_name,
+            mime,
+            artifact.artifact.size_bytes,
+            artifact.artifact.artifact_id,
+            artifact.artifact.path,
+        ));
+    }
+    result
 }
 
 async fn record_worker_lifecycle(

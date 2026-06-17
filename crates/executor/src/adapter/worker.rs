@@ -26,6 +26,22 @@ pub enum WorkerCommand {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerInboundAttachment {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub url: String,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkerEvent {
     Connected {
@@ -41,6 +57,8 @@ pub enum WorkerEvent {
         text: String,
         #[serde(default)]
         message_id: Option<String>,
+        #[serde(default)]
+        attachments: Vec<WorkerInboundAttachment>,
         #[serde(default)]
         metadata: Value,
     },
