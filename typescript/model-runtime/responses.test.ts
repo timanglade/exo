@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { Response } from "openai/resources/responses/responses";
 
 import {
+  buildNonStreamingBody,
+  buildStreamingBody,
   ChatCompletionsRuntime,
   modelRequiresResponsesApi,
   responseToLinguaEvents,
@@ -48,6 +50,16 @@ describe("model runtime dispatch", () => {
         apiKey: "key",
       }),
     ).toBeInstanceOf(ResponsesRuntime);
+  });
+});
+
+describe("reasoning summaries", () => {
+  it("requests reasoning summaries on both streaming and non-streaming bodies", () => {
+    const request = { model: "gpt-5.4", messages: [] };
+    expect(buildStreamingBody(request).reasoning).toEqual({ summary: "auto" });
+    expect(buildNonStreamingBody(request).reasoning).toEqual({
+      summary: "auto",
+    });
   });
 });
 
